@@ -198,7 +198,7 @@ while True:
 ser.close()
 
 # Save CSV
-filename = f"{session_label}_{sensor_name}_calibration.csv"
+filename = f"calibrationWeights/{session_label}_{sensor_name}_calibration.csv"
 with open(filename, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(["Force_N", f"{sensor_name}_mean"])
