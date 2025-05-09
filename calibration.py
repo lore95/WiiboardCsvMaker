@@ -6,6 +6,79 @@ import csv
 import glob
 import sys
 import statistics
+import numpy as np
+from collections import deque
+import os
+import csv
+import re
+import numpy as np
+from collections import deque
+import matplotlib.pyplot as plt  # Optional: comment out if not plotting
+
+# # --- Load calibration functions ---
+# calibration_dir = "calibrationWeights"
+# conversion_functions = {}
+
+# for filename in os.listdir(calibration_dir):
+#     match = re.search(r'(V\d)', filename)
+#     if not match:
+#         continue
+
+#     sensor = match.group(1)
+#     forces = []
+#     raw_means = []
+
+#     filepath = os.path.join(calibration_dir, filename)
+#     with open(filepath, newline='') as f:
+#         reader = csv.reader(f)
+#         header = next(reader)
+#         for row in reader:
+#             try:
+#                 force_N = float(row[0])
+#                 raw_val = float(row[1])
+#                 forces.append(force_N)
+#                 raw_means.append(raw_val)
+#             except:
+#                 print(f"⚠️ Skipping invalid row in {filename}: {row}")
+#                 continue
+
+#     if not any(f == 0.0 for f in forces):
+#         print(f"❗ WARNING: No 0 N baseline in {filename}. This will cause offset errors.")
+
+#     # Fit linear model
+#     coeffs = np.polyfit(raw_means, forces, 1)
+#     slope, intercept = coeffs
+#     conversion_functions[sensor] = (slope, intercept)
+
+#     # Intercept sanity check
+#     if abs(intercept) > 5:
+#         print(f"⚠️ {sensor}: Intercept = {intercept:.2f} N — possible calibration issue.")
+
+#     print(f"{sensor} calibration: Force_N = {slope:.4f} * Raw + {intercept:.4f}")
+
+#     # --- Optional: plot for visual check
+#     try:
+#         fit = np.poly1d(coeffs)
+#         x = np.array(raw_means)
+#         y = np.array(forces)
+#         x_fit = np.linspace(min(x), max(x), 100)
+#         y_fit = fit(x_fit)
+
+#         plt.plot(x, y, 'o', label=f'{sensor} data')
+#         plt.plot(x_fit, y_fit, '-', label=f'{sensor} fit')
+#         plt.xlabel("Raw Value")
+#         plt.ylabel("Force (N)")
+#         plt.title(f"{sensor} Calibration Fit")
+#         plt.grid(True)
+#         plt.legend()
+#     except Exception as e:
+#         print(f"Could not plot {sensor}: {e}")
+
+# # Show all sensor plots in one window
+# plt.show()
+
+
+
 
 def find_usbmodem_port():
     ports = glob.glob('/dev/tty.usbmodem*')
@@ -19,6 +92,9 @@ def record_data(prompt_msg, ser):
     stop_event = threading.Event()
     buffer_lock = threading.Lock()
 
+    # Median filter buffers for V1–V4
+    history = [deque(maxlen=3) for _ in range(4)]
+
     def read_data():
         while not stop_event.is_set():
             try:
@@ -26,8 +102,20 @@ def record_data(prompt_msg, ser):
                 match = re.match(r'Time:(-?\d+),V1:(-?\d+),V2:(-?\d+),V3:(-?\d+),V4:(-?\d+)', line)
                 if match:
                     t_ms, v1, v2, v3, v4 = map(int, match.groups())
+                    raw_values = [v1, v2, v3, v4]
+
+                    # Update history and apply median
+                    smoothed_values = []
+                    for i in range(4):
+                        history[i].append(raw_values[i])
+                        if len(history[i]) == history[i].maxlen:
+                            smoothed = int(np.median(history[i]))
+                        else:
+                            smoothed = raw_values[i]
+                        smoothed_values.append(smoothed)
+
                     with buffer_lock:
-                        data_buffer.append([t_ms, v1, v2, v3, v4])
+                        data_buffer.append([t_ms] + smoothed_values)
             except:
                 continue
 

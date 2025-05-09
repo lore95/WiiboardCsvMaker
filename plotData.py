@@ -30,5 +30,5 @@ def plot_voltage_data(file_path):
     plt.show()
 
 # Example usage:
-file_path = "data_output2.csv"  # Change this to the actual file path
+file_path = "data_converted.csv"  # Change this to the actual file path
 plot_voltage_data(file_path)
