@@ -39,11 +39,11 @@ import matplotlib.pyplot as plt  # Optional: comment out if not plotting
 #                 forces.append(force_N)
 #                 raw_means.append(raw_val)
 #             except:
-#                 print(f"⚠️ Skipping invalid row in {filename}: {row}")
+#                 print(f" Skipping invalid row in {filename}: {row}")
 #                 continue
 
 #     if not any(f == 0.0 for f in forces):
-#         print(f"❗ WARNING: No 0 N baseline in {filename}. This will cause offset errors.")
+#         print(f" WARNING: No 0 N baseline in {filename}. This will cause offset errors.")
 
 #     # Fit linear model
 #     coeffs = np.polyfit(raw_means, forces, 1)
@@ -52,7 +52,7 @@ import matplotlib.pyplot as plt  # Optional: comment out if not plotting
 
 #     # Intercept sanity check
 #     if abs(intercept) > 5:
-#         print(f"⚠️ {sensor}: Intercept = {intercept:.2f} N — possible calibration issue.")
+#         print(f" {sensor}: Intercept = {intercept:.2f} N — possible calibration issue.")
 
 #     print(f"{sensor} calibration: Force_N = {slope:.4f} * Raw + {intercept:.4f}")
 
