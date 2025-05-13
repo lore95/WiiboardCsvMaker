@@ -8,7 +8,7 @@ import sys
 import os
 import numpy as np
 
-# --- Load calibration functions ---
+# --- Load calibration functions (quadratic fit) ---
 calibration_dir = "calibrationWeights"
 conversion_functions = {}
 
@@ -26,15 +26,13 @@ for filename in os.listdir(calibration_dir):
         reader = csv.reader(f)
         next(reader)  # Skip header
         for row in reader:
-            force_N = float(row[0])
-            raw_val = float(row[1])
-            forces.append(force_N)
-            raw_means.append(raw_val)
+            forces.append(float(row[0]))
+            raw_means.append(float(row[1]))
 
-    coeffs = np.polyfit(raw_means, forces, 1)
-    slope, intercept = coeffs
-    conversion_functions[sensor] = (slope, intercept)
-    print(f"{sensor} calibration: Force_N = {slope:.4f} * Raw + {intercept:.4f}")
+    # Fit a quadratic curve: force = a*raw^2 + b*raw + c
+    a, b, c = np.polyfit(raw_means, forces, 2)
+    conversion_functions[sensor] = (a, b, c)
+    print(f"{sensor} calibration (quad): F = {a:.6e}·Raw² + {b:.6f}·Raw + {c:.6f}")
 
 # --- Find USB modem port ---
 def find_usbmodem_port():
@@ -42,6 +40,7 @@ def find_usbmodem_port():
     if not ports:
         print("No USB modem device found.")
         sys.exit(1)
+    print("connected to:", ports[0])
     return ports[0]
 
 port_name = find_usbmodem_port()
@@ -65,63 +64,73 @@ def read_data():
     index = 0
     prev_time = None
     prev_values = None
+    skipped_counter = 0
+
+    pattern = re.compile(
+        r'Time:(-?\d+),V1:(-?\d+(?:\.\d+)?),V2:(-?\d+(?:\.\d+)?),'
+        r'V3:(-?\d+(?:\.\d+)?),V4:(-?\d+(?:\.\d+)?)'
+    )
 
     while not stop_event.is_set():
         try:
-            line = ser.readline().decode('utf-8').strip()
-            match = re.match(r'Time:(-?\d+),V1:(-?\d+),V2:(-?\d+),V3:(-?\d+),V4:(-?\d+)', line)
-            if match:
-                t_ms, v1, v2, v3, v4 = map(int, match.groups())
-                raw_values = [v1, v2, v3, v4]
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            match = pattern.match(line)
+            if not match:
+                continue
 
-                # Step time
-                step_ms = 0 if prev_time is None else t_ms - prev_time
+            t_ms = int(match.group(1))
+            raw_values = [float(match.group(i)) for i in range(2, 6)]
 
-                # Noise filter
-                if prev_values:
-                    too_noisy = False
-                    for i in range(4):
-                        prev_v = prev_values[i]
-                        curr_v = raw_values[i]
-                        if prev_v == 0:
-                            continue
-                        percent_change = abs(curr_v - prev_v) / abs(prev_v)
-                        if percent_change > 1.8:
-                            too_noisy = True
-                            break
-                        if percent_change < -1.8:
-                            too_noisy = True
-                            break
-                    if too_noisy:
-                        print(f"Skipped noisy reading at index {index}: {raw_values}")
+            # Step time
+            step_ms = 0 if prev_time is None else t_ms - prev_time
+
+            # Smart noise filter
+            if prev_values:
+                valid = 0
+                for p, c in zip(prev_values, raw_values):
+                    if p == 0:
                         continue
+                    if abs(c - p) / abs(p) < 1.5:
+                        valid += 1
 
-                # Convert to Newtons
-                converted_values = []
-                for i, raw in enumerate(raw_values):
-                    label = f"V{i+1}"
-                    if label in conversion_functions:
-                        slope, intercept = conversion_functions[label]
-                        converted = round(slope * raw + intercept, 3)
+                if valid < 2:
+                    skipped_counter += 1
+                    if skipped_counter <= 10:
+                        print(f"Skipped noisy frame {index} (valid={valid}/4)")
+                        continue
                     else:
-                        converted = None
-                    converted_values.append(converted)
+                        print("⚠️ Forcing accept after 10 skips")
+                        skipped_counter = 0
+                else:
+                    skipped_counter = 0
 
-                print(index, t_ms, step_ms, *converted_values)
-                new_entry = [index, t_ms, step_ms] + converted_values
+            # Apply quadratic calibration per sensor
+            converted_values = []
+            for i, raw in enumerate(raw_values):
+                label = f"V{i+1}"
+                if raw is None or label not in conversion_functions:
+                    converted = None
+                else:
+                    a, b, c = conversion_functions[label]
+                    force = a * raw**2 + b * raw + c
+                    converted = round(force, 3)
+                converted_values.append(converted)
 
-                with buffer_lock:
-                    data_buffer.append(new_entry)
+            print(index, t_ms, step_ms, *raw_values)
+            new_entry = [index, t_ms, step_ms] + converted_values
 
-                prev_time = t_ms
-                prev_values = raw_values
-                index += 1
+            with buffer_lock:
+                data_buffer.append(new_entry)
+
+            prev_time = t_ms
+            prev_values = raw_values
+            index += 1
 
         except Exception as e:
             print(f"Error: {e}")
             break
 
-# --- Save data to CSV ---
+# --- Save data to CSV (unchanged) ---
 def save_to_csv(filename="data_converted.csv"):
     with buffer_lock:
         with open(filename, 'w', newline='') as f:

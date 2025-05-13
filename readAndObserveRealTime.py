@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-# --- Load calibration functions ---
+# --- Load calibration functions (quadratic fit) ---
 calibration_dir = "calibrationWeights"
 conversion_functions = {}
 
@@ -33,10 +33,10 @@ for filename in os.listdir(calibration_dir):
             forces.append(force_N)
             raw_means.append(raw_val)
 
-    coeffs = np.polyfit(raw_means, forces, 1)
-    slope, intercept = coeffs
-    conversion_functions[sensor] = (slope, intercept)
-    print(f"{sensor} calibration: Force_N = {slope:.4f} * Raw + {intercept:.4f}")
+    # Fit quadratic: force = a*raw^2 + b*raw + c
+    a, b, c = np.polyfit(raw_means, forces, 2)
+    conversion_functions[sensor] = (a, b, c)
+    print(f"{sensor} calibration (quad): F = {a:.6e}·Raw² + {b:.6f}·Raw + {c:.6f}")
 
 # --- Find USB modem port ---
 def find_usbmodem_port():
@@ -69,15 +69,20 @@ def read_data():
     prev_values = None
     skipped_counter = 0
 
+    pattern = re.compile(
+        r'Time:(-?\d+),V1:(-?\d+(?:\.\d+)?),'
+        r'V2:(-?\d+(?:\.\d+)?),V3:(-?\d+(?:\.\d+)?),V4:(-?\d+(?:\.\d+)?)'
+    )
+
     while not stop_event.is_set():
         try:
-            line = ser.readline().decode('utf-8').strip()
-            match = re.match(r'Time:(-?\d+),V1:(-?\d+),V2:(-?\d+),V3:(-?\d+),V4:(-?\d+)', line)
+            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            match = pattern.match(line)
             if not match:
                 continue
 
-            t_ms, v1, v2, v3, v4 = map(int, match.groups())
-            raw_values = [v1, v2, v3, v4]
+            t_ms = int(match.group(1))
+            raw_values = [float(match.group(i)) for i in range(2, 6)]
 
             # Step time
             step_ms = 0 if prev_time is None else t_ms - prev_time
@@ -85,13 +90,10 @@ def read_data():
             # Smart noise filter
             if prev_values:
                 valid = 0
-                for i in range(4):
-                    prev_v = prev_values[i]
-                    curr_v = raw_values[i]
-                    if prev_v == 0:
+                for p, c in zip(prev_values, raw_values):
+                    if p == 0:
                         continue
-                    percent_change = abs(curr_v - prev_v) / abs(prev_v)
-                    if percent_change < 1.8:
+                    if abs(c - p) / abs(p) < 1.8:
                         valid += 1
 
                 if valid < 2:
@@ -105,13 +107,14 @@ def read_data():
                 else:
                     skipped_counter = 0
 
-            # Convert to Newtons
+            # Quadratic conversion to Newtons
             converted_values = []
             for i, raw in enumerate(raw_values):
                 label = f"V{i+1}"
-                if label in conversion_functions:
-                    slope, intercept = conversion_functions[label]
-                    converted = slope * raw + intercept
+                if raw is not None and label in conversion_functions:
+                    a, b, c = conversion_functions[label]
+                    force = a * raw**2 + b * raw + c
+                    converted = round(force, 3)
                 else:
                     converted = None
                 converted_values.append(converted)
@@ -130,7 +133,7 @@ def read_data():
 # --- Plotting setup ---
 fig, ax = plt.subplots()
 lines = [ax.plot([], [], label=f"V{i+1}")[0] for i in range(4)]
-ax.set_title("Live Sensor Data (Forces in Newtons)")
+ax.set_title("Live Sensor Data (Forces in Newtons, Quadratic Calibration)")
 ax.set_xlabel("Sample Index")
 ax.set_ylabel("Force (N)")
 ax.grid(True)
@@ -139,21 +142,22 @@ ax.legend()
 def update_plot(frame):
     with buffer_lock:
         if len(data_buffer) < 10:
-            return
+            return lines
         recent = data_buffer[-100:]
         x_vals = [row[0] for row in recent]
-        for i in range(4):
-            y_vals = [row[i+1] for row in recent]
-            lines[i].set_data(x_vals, y_vals)
+        for i, line in enumerate(lines):
+            y_vals = [row[i+1] if row[i+1] is not None else 0 for row in recent]
+            line.set_data(x_vals, y_vals)
         ax.relim()
         ax.autoscale_view()
+    return lines
 
 # --- Main Execution ---
 if __name__ == "__main__":
     reading_thread = threading.Thread(target=read_data, daemon=True)
     reading_thread.start()
 
-    ani = FuncAnimation(fig, update_plot, interval=50)
+    ani = FuncAnimation(fig, update_plot, interval=50, blit=False)
     plt.show()
 
     stop_event.set()
