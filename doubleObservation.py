@@ -210,7 +210,7 @@ def finalize_and_exit():
     try:
         import datetime
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        save_filename = f"session_{ts}.csv"
+        save_filename = f"Readings/session_{ts}.csv"
         with open(save_filename, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["v1", "v2", "v3", "v4", "total_force_N"])
