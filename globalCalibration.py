@@ -146,7 +146,7 @@ while True:
 ser.close()
 
 # Save CSV (AVG-based)
-filename = f"calibrationWeights/{session_label}_AVG_calibration.csv"
+filename = f"calibrationWeight/{session_label}_AVG_calibration.csv"
 with open(filename, 'w', newline='') as f:
     writer = csv.writer(f)
     writer.writerow(["Force_N", "Avg_mean"])
@@ -154,34 +154,3 @@ with open(filename, 'w', newline='') as f:
         writer.writerow([round(f_n, 3), round(v, 2)])
 
 print(f"\nCalibration data saved to {filename}")
-
-# ------------- Optional: quick linear fit & print -------------
-# If you want to immediately compute a linear conversion (Force = a*Raw + b) from
-# these averaged means, uncomment below.
-#
-# if len(set(avg_means)) >= 2:
-#     coeffs = np.polyfit(avg_means, forces, 1)
-#     slope, intercept = coeffs
-#     print(f"Global calibration (using Avg_mean): Force_N = {slope:.4f} * Avg_mean + {intercept:.4f}")
-# else:
-#     print("Not enough distinct points to fit a line.")
-#
-# # Optional quick plot
-# try:
-#     import matplotlib.pyplot as plt
-#     x = np.array(avg_means)
-#     y = np.array(forces)
-#     fit = np.poly1d(np.polyfit(x, y, 1))
-#     x_fit = np.linspace(min(x), max(x), 100)
-#     y_fit = fit(x_fit)
-#     plt.figure()
-#     plt.plot(x, y, 'o', label='Data')
-#     plt.plot(x_fit, y_fit, '-', label='Fit')
-#     plt.xlabel("Avg_mean (raw)")
-#     plt.ylabel("Force (N)")
-#     plt.title(f"{session_label} Global Calibration")
-#     plt.grid(True)
-#     plt.legend()
-#     plt.show()
-# except Exception as e:
-#     print(f"Plotting skipped: {e}")
