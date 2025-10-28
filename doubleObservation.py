@@ -9,16 +9,14 @@ import os
 import numpy as np
 
 import matplotlib
-# Choose a GUI backend that opens real windows
-matplotlib.use("TkAgg")   # or "QtAgg" / "Qt5Agg" / "MacOSX" (Mac only)
+matplotlib.use("TkAgg") 
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
-# --- CONFIG ---
 CAL_DIR = "calibrationWeight"
-CAL_FILENAME = None  # e.g. "AB_AVG_calibration.csv"
+CAL_FILENAME = None  # automatically assigned in loop
 
-# --- Load single averaged calibration (quadratic fit) ---
+# Load calibration done by approximaiton (division by 4 of total offset)
 def load_avg_calibration(cal_dir, cal_filename=None):
     target_path = None
     if cal_filename:
@@ -68,7 +66,8 @@ def load_avg_calibration(cal_dir, cal_filename=None):
     print(f"Global calibration (quad): F = {a:.6e}·AvgRaw² + {b:.6f}·AvgRaw + {c:.6f}")
     return a, b, c
 
-# --- Find USB modem port ---
+# select usb device of type usbmodem (wiiboard name)
+# TODO: need to implement recursive selection and thread opening on each one
 def find_usbmodem_port():
     ports = glob.glob('/dev/tty.usbmodem*')
     if not ports:
@@ -79,6 +78,7 @@ def find_usbmodem_port():
 # Load calibration (single global)
 a, b, c = load_avg_calibration(CAL_DIR, CAL_FILENAME)
 
+#config serial port
 port_name = find_usbmodem_port()
 ser = serial.Serial(
     port=port_name,
@@ -89,14 +89,14 @@ ser = serial.Serial(
     timeout=1
 )
 
-# --- Shared state ---
+# open port
 buffer_lock = threading.Lock()
-# Each entry: (index, v1, v2, v3, v4, F_total)
+# Each entry: (index, v1_raw, v2_raw, v3_raw, v4_raw, F1, F2, F3, F4, F_total)
 data_buffer = []
 stop_event = threading.Event()
 _saved_once = threading.Event()  # prevents double-save on multiple callbacks
 
-# --- Data reader thread ---
+# Thread for continuos data reading
 def read_data():
     index = 0
     pattern = re.compile(
@@ -120,8 +120,21 @@ def read_data():
             F_total = a * (avg_raw ** 2) + b * avg_raw + c
             F_total = float(np.round(F_total, 3))
 
+            # Split total force into sensor contributions (N) by raw share
+            raw_sum = v1 + v2 + v3 + v4
+            if raw_sum != 0:
+                weights = [v1/raw_sum, v2/raw_sum, v3/raw_sum, v4/raw_sum]
+            else:
+                weights = [0.25, 0.25, 0.25, 0.25]
+
+            F1 = float(np.round(F_total * weights[0], 3))
+            F2 = float(np.round(F_total * weights[1], 3))
+            F3 = float(np.round(F_total * weights[2], 3))
+            F4 = float(np.round(F_total * weights[3], 3))
+
             with buffer_lock:
-                data_buffer.append((index, v1, v2, v3, v4, F_total))
+                # store BOTH raw values and per-sensor forces for csv saving
+                data_buffer.append((index, v1, v2, v3, v4, F1, F2, F3, F4, F_total))
 
             index += 1
 
@@ -129,7 +142,7 @@ def read_data():
             print(f"Read error: {e}")
             continue
 
-# --- Plot 1: Total force (single line) ---
+# Plot of total force (1 line)
 fig1 = plt.figure(num="Total Force")
 ax1 = fig1.add_subplot(1, 1, 1)
 (line_total,) = ax1.plot([], [], label="Total Force (Avg-calibrated)")
@@ -145,17 +158,19 @@ def update_plot_total(_frame):
             return (line_total,)
         recent = data_buffer[-300:]
         x_vals = [row[0] for row in recent]
-        y_vals = [row[5] for row in recent]  # F_total
+        y_vals = [row[9] for row in recent]  # F_total at index 9
         line_total.set_data(x_vals, y_vals)
         ax1.relim()
         ax1.autoscale_view()
     return (line_total,)
 
-# --- Plot 2: Force distribution per sensor (4 lines) ---
+# Plot of Force per sensor (4 lines)
 fig2 = plt.figure(num="Force Distribution")
 ax2 = fig2.add_subplot(1, 1, 1)
-lines_dist = [ax2.plot([], [], label=f"V{i+1} share")[0] for i in range(4)]
-ax2.set_title("Force Distribution per Sensor (N)")
+lines_dist = [
+    ax2.plot([], [], label=f"V{i+1} force (N)")[0] for i in range(4)
+]
+ax2.set_title("Per-Sensor Forces (N)")
 ax2.set_xlabel("Sample Index")
 ax2.set_ylabel("Force (N)")
 ax2.grid(True)
@@ -168,22 +183,16 @@ def update_plot_distribution(_frame):
         recent = data_buffer[-300:]
         x_vals = [row[0] for row in recent]
 
+        # Per-sensor forces are at indices 5..8
         for i, line in enumerate(lines_dist):
-            y_vals = []
-            for _, v1, v2, v3, v4, Ft in recent:
-                raw_sum = v1 + v2 + v3 + v4
-                if raw_sum != 0:
-                    weights = [v1/raw_sum, v2/raw_sum, v3/raw_sum, v4/raw_sum]
-                else:
-                    weights = [0.25, 0.25, 0.25, 0.25]
-                y_vals.append(float(np.round(Ft * weights[i], 3)))
+            y_vals = [row[5 + i] for row in recent]
             line.set_data(x_vals, y_vals)
 
         ax2.relim()
         ax2.autoscale_view()
     return lines_dist
 
-# --- Finalize: save CSV + close everything ---
+# Save csv and exit
 def finalize_and_exit():
     # make idempotent
     if _saved_once.is_set():
@@ -197,7 +206,7 @@ def finalize_and_exit():
     except Exception:
         pass
     try:
-        # join if it exists and is alive (set later in main)
+        # join if it exists and is alive we dont want hanging threads (set later in main)
         if 'reading_thread' in globals() and reading_thread.is_alive():
             reading_thread.join(timeout=2)
     except Exception:
@@ -206,16 +215,22 @@ def finalize_and_exit():
     with buffer_lock:
         rows = list(data_buffer)
 
-    # Save CSV with required columns
+    # Save CSV with BOTH raw and force values
     try:
         import datetime
+        os.makedirs("Readings", exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         save_filename = f"Readings/session_{ts}.csv"
         with open(save_filename, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["v1", "v2", "v3", "v4", "total_force_N"])
-            for _, v1, v2, v3, v4, Ft in rows:
-                w.writerow([v1, v2, v3, v4, Ft])
+            w.writerow([
+                "v1_raw", "v2_raw", "v3_raw", "v4_raw",
+                "v1_force_N", "v2_force_N", "v3_force_N", "v4_force_N",
+                "total_force_N"
+            ])
+            for row in rows:
+                _, v1, v2, v3, v4, F1, F2, F3, F4, Ft = row
+                w.writerow([v1, v2, v3, v4, F1, F2, F3, F4, Ft])
         print(f"Saved {len(rows)} rows to {save_filename}")
     except Exception as e:
         print(f"Failed to save CSV: {e}")
@@ -227,13 +242,13 @@ def finalize_and_exit():
 
     plt.close('all')  # closes both windows
 
-# --- Keyboard & close handlers ---
+#Listen of esc bind to exit
 def on_key(event):
     if event.key == 'escape':
         finalize_and_exit()
 
 def on_close(_event):
-    # If a window is closed via the UI, still save once.
+    # Also do the same on closing plots
     finalize_and_exit()
 
 fig1.canvas.mpl_connect('key_press_event', on_key)
@@ -241,7 +256,7 @@ fig2.canvas.mpl_connect('key_press_event', on_key)
 fig1.canvas.mpl_connect('close_event', on_close)
 fig2.canvas.mpl_connect('close_event', on_close)
 
-# --- Main Execution ---
+# Main
 if __name__ == "__main__":
     reading_thread = threading.Thread(target=read_data, daemon=True)
     reading_thread.start()
