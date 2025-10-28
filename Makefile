@@ -18,13 +18,13 @@ conda_setup:
 	@echo "Setting up Conda environment: $(ENV_NAME)"
 	conda create --name $(ENV_NAME) python=$(PYTHON_VERSION) -y
 	conda run -n $(ENV_NAME) pip install -r requirements.txt
-	@echo "Done. Activate with: conda activate $(ENV_NAME)"
+	@echo "Done. Activate with: conda activate $(ENV_NAME), then run app.py"
 
 venv_setup:
 	@echo "Setting up Python virtual environment in $(VENV_DIR)"
 	python3 -m venv $(VENV_DIR)
 	$(VENV_DIR)/bin/pip install -r requirements.txt
-	@echo "Done. Activate with: source $(VENV_DIR)/bin/activate"
+	@echo "Done. Activate with: source $(VENV_DIR)/bin/activate, then run app.py"
 
 clean:
 	@read -p "Remove Conda env or venv? (C/V): " choice; \
