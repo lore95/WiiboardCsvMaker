@@ -112,6 +112,18 @@ void setup()
   Serial.println("Waiting a client connection to notify...");
 }
 #define TARE_SAMPLES 500
+
+void checkSerialSyncCommand() {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == 's' || c == 'S') {
+      uint32_t now = micros();
+      // send a clear, unique sync line
+      Serial.printf("SYNC:%lu\n", (unsigned long)now);
+    }
+  }
+}
+
 void loop()
 {
   adcOutput res;
@@ -173,5 +185,6 @@ void loop()
     if (deviceConnected && !oldDeviceConnected) {
         oldDeviceConnected = deviceConnected;
     }
+    checkSerialSyncCommand();
   }
 }

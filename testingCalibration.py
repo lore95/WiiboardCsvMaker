@@ -15,11 +15,26 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button
 
+# =========================
+# Config
+# =========================
+
 CAL_DIR = "calibrationWeight"
 CAL_FILENAME = None  # automatically assigned in loop
+BASELINE_SECONDS = 2.0  # first N seconds assumed empty (tare)
 
-#load calibration
-def load_avg_calibration(cal_dir, cal_filename=None):
+# =========================
+# Calibration
+# =========================
+
+def load_calibration_slope(cal_dir, cal_filename=None):
+    """
+    Load calibration CSV and compute:
+        Force_N = m * Avg_mean + b
+
+    Returns:
+        m, b
+    """
     target_path = None
     if cal_filename:
         candidate = os.path.join(cal_dir, cal_filename)
@@ -28,10 +43,12 @@ def load_avg_calibration(cal_dir, cal_filename=None):
             sys.exit(1)
         target_path = candidate
     else:
+        # Prefer *_AVG_calibration.csv
         for fname in os.listdir(cal_dir):
             if fname.endswith("_AVG_calibration.csv"):
                 target_path = os.path.join(cal_dir, fname)
                 break
+        # Fallback to any .csv
         if target_path is None:
             for fname in os.listdir(cal_dir):
                 if fname.lower().endswith(".csv"):
@@ -59,18 +76,26 @@ def load_avg_calibration(cal_dir, cal_filename=None):
             try:
                 forces.append(float(row[force_idx]))
                 avg_raws.append(float(row[raw_idx]))
-            except:
+            except Exception:
                 pass
 
     if len(forces) < 2:
         print(f"Not enough calibration points in {target_path}")
         sys.exit(1)
 
-    m, q = np.polyfit(avg_raws, forces, 1)
-    print(f"Global calibration (linear): F = {m:.6f}·AvgRaw + {q:.6f}")
-    return m, q, 0.0   # keep tuple shape to avoid breaking other code
+    forces = np.asarray(forces, dtype=float)
+    avg_raws = np.asarray(avg_raws, dtype=float)
 
-#port selection todo: make iteratative multiple ports
+    # Linear fit: Force_N = m * Avg_mean + b
+    m, b = np.polyfit(avg_raws, forces, 1)
+    print(f"Calibration fit: Force_N = {m:.6f}·AvgRaw + {b:.6f}")
+    return m, b
+
+
+# =========================
+# Port selection
+# =========================
+
 def find_usbmodem_port():
     ports = glob.glob('/dev/tty.usbmodem*')
     if not ports:
@@ -78,8 +103,13 @@ def find_usbmodem_port():
         sys.exit(1)
     return ports[0]
 
-#setup
-a, b, c = load_avg_calibration(CAL_DIR, CAL_FILENAME)
+
+# =========================
+# Setup
+# =========================
+
+# We use only the slope m for smart tare (offset is learned from baseline)
+M, B = load_calibration_slope(CAL_DIR, CAL_FILENAME)
 
 port_name = find_usbmodem_port()
 ser = serial.Serial(
@@ -97,8 +127,20 @@ data_buffer = []
 stop_event = threading.Event()
 _saved_once = threading.Event()  # prevents double-save on multiple callbacks
 
-# reading thread
+# Baseline / tare state (first BASELINE_SECONDS considered weightless)
+baseline_done = False
+baseline_start = None
+baseline_samples = []
+baseline_raw = 0.0
+
+
+# =========================
+# Reading thread
+# =========================
+
 def read_data():
+    global baseline_done, baseline_start, baseline_samples, baseline_raw
+
     index = 0
     pattern = re.compile(
         r'Time:(-?\d+),V1:(-?\d+(?:\.\d+)?),'
@@ -116,14 +158,44 @@ def read_data():
             _t_ms = int(match.group(1))
             v1, v2, v3, v4 = [float(match.group(i)) for i in range(2, 6)]
 
-            # Total force via avg-based quadratic
             avg_raw = (v1 + v2 + v3 + v4) / 4.0
-            F_total = a * avg_raw + b
-            
+            if baseline_done:
+                print(f"idx={index:6d} avg_raw={avg_raw:10.1f}")
+            # ===== Baseline (tare) phase: first BASELINE_SECONDS =====
+            if not baseline_done:
+                now = time.perf_counter()
+                if baseline_start is None:
+                    baseline_start = now
+                    baseline_samples.append(avg_raw)
+                else:
+                    baseline_samples.append(avg_raw)
+
+                elapsed = now - baseline_start
+                if elapsed >= BASELINE_SECONDS and baseline_samples:
+                    baseline_raw = float(np.mean(baseline_samples))
+                    baseline_done = True
+                    print(
+                        f"[{port_name}] Baseline established over "
+                        f"{elapsed:.2f}s: baseline_raw = {baseline_raw:.3f}"
+                    )
+
+                # Until baseline is done, skip force computation / logging
+                if not baseline_done:
+                    continue
+
+            # ===== After baseline: apply tare and calibration slope =====
+            # Corrected raw so baseline_raw -> 0
+            raw_corr = avg_raw - baseline_raw
+            print("baselineraw: " + str(baseline_raw))
+            # Linear model: Force_N = M * raw_corr
+            F_total = M * raw_corr
+            if F_total < 0:
+                F_total = 0.0  # clamp tiny negatives
+
             # Split total force into sensor contributions (N) by raw share
             raw_sum = v1 + v2 + v3 + v4
             if raw_sum != 0:
-                weights = [v1/raw_sum, v2/raw_sum, v3/raw_sum, v4/raw_sum]
+                weights = [v1 / raw_sum, v2 / raw_sum, v3 / raw_sum, v4 / raw_sum]
             else:
                 weights = [0.25, 0.25, 0.25, 0.25]
 
@@ -131,9 +203,12 @@ def read_data():
             F2 = float(np.round(F_total * weights[1], 3))
             F3 = float(np.round(F_total * weights[2], 3))
             F4 = float(np.round(F_total * weights[3], 3))
+            F_total_rounded = float(np.round(F_total, 3))
 
             with buffer_lock:
-                data_buffer.append((index, v1, v2, v3, v4, F1, F2, F3, F4, F_total))
+                data_buffer.append(
+                    (index, v1, v2, v3, v4, F1, F2, F3, F4, F_total_rounded)
+                )
 
             index += 1
 
@@ -141,13 +216,16 @@ def read_data():
             print(f"Read error: {e}")
             continue
 
-#plot setup
+
+# =========================
+# Plot setup
+# =========================
 
 # Figure 1: Total Force
 fig1 = plt.figure(num="Total Force")
 ax1 = fig1.add_subplot(1, 1, 1)
-(line_total,) = ax1.plot([], [], label="Total Force (Avg-calibrated)")
-ax1.set_title("Live Total Force (N) — Averaged Calibration")
+(line_total,) = ax1.plot([], [], label="Total Force (N)")
+ax1.set_title("Live Total Force (N) — CSV slope + 2s tare")
 ax1.set_xlabel("Sample Index")
 ax1.set_ylabel("Force (N)")
 ax1.grid(True)
@@ -167,7 +245,11 @@ ax2.set_ylabel("Force (N)")
 ax2.grid(True)
 ax2.legend()
 
-#realtime plots
+
+# =========================
+# Realtime plots
+# =========================
+
 def update_plot_total(_frame):
     with buffer_lock:
         if len(data_buffer) < 10:
@@ -179,6 +261,7 @@ def update_plot_total(_frame):
         ax1.relim()
         ax1.autoscale_view()
     return (line_total,)
+
 
 def update_plot_distribution(_frame):
     with buffer_lock:
@@ -193,7 +276,11 @@ def update_plot_distribution(_frame):
         ax2.autoscale_view()
     return lines_dist
 
-#create and save csv
+
+# =========================
+# Save CSV and cleanup
+# =========================
+
 def finalize_and_exit():
     # make idempotent
     if _saved_once.is_set():
@@ -242,7 +329,11 @@ def finalize_and_exit():
 
     plt.close('all')  # closes both windows
 
-#stop from app
+
+# =========================
+# Signal handlers
+# =========================
+
 def _handle_term(_signum, _frame):
     try:
         finalize_and_exit()
@@ -254,7 +345,11 @@ signal.signal(getattr(signal, "SIGTERM", signal.SIGINT), _handle_term)
 if hasattr(signal, "SIGBREAK"):  # Windows console CTRL_BREAK_EVENT
     signal.signal(signal.SIGBREAK, _handle_term)
 
-#gui
+
+# =========================
+# GUI callbacks
+# =========================
+
 def on_key(event):
     if event.key == 'escape':
         finalize_and_exit()
@@ -271,6 +366,11 @@ fig1.canvas.mpl_connect('key_press_event', on_key)
 fig2.canvas.mpl_connect('key_press_event', on_key)
 fig1.canvas.mpl_connect('close_event', on_close)
 fig2.canvas.mpl_connect('close_event', on_close)
+
+
+# =========================
+# Main
+# =========================
 
 if __name__ == "__main__":
     reading_thread = threading.Thread(target=read_data, daemon=True)
