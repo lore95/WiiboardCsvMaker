@@ -83,7 +83,7 @@ void setup()
   adc.setChannelPGA(1, CHANNEL_PGA_128);
   adc.setChannelPGA(2, CHANNEL_PGA_128);
   adc.setChannelPGA(3, CHANNEL_PGA_128);
-  adc.setOsr(OSR_4096);
+  adc.setOsr(OSR_128);
 
 
 
@@ -128,7 +128,7 @@ void loop()
 {
   adcOutput res;
   int32_t tare[4] = {0, 0, 0, 0};
-  int32_t accumulate_average_samples = 50;
+  int32_t accumulate_average_samples = 20;
   double accumulated_value[4] = {0,0,0,0};
   uint32_t average_count = 0;
   float send_value[4];
